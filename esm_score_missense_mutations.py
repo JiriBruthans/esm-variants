@@ -33,35 +33,65 @@ def fasta_to_dataframe(fasta_file):
 
 
 def main(args):
-    """
-    Execute the main script logic.
-    
-    Parameters:
-    args (Namespace): Arguments parsed from command line input.
-    """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print('Using {}.'.format('GPU' if device == 'cuda' else 'CPU (this may be much slower)'))
-
-    input_df = fasta_to_dataframe(args.input_fasta_file)
 
     print('Loading the model ({})...'.format(args.model_name))
     model, alphabet, batch_converter, repr_layer = load_esm_model(args.model_name, device)
 
-    print('Invoking the model...')
-    input_df_ids, LLRs = get_wt_LLR(input_df, model=model, alphabet=alphabet, batch_converter=batch_converter, device=device)
+    input_df = fasta_to_dataframe(args.input_fasta_file)
 
-    print('Saving results...')
-    results = []
-    for seq_id, LLR in zip(input_df_ids, LLRs):
-        raw_seq_results = LLR.transpose().stack().reset_index().rename(columns = {'level_0': 'wt_aa_and_pos', 'level_1': 'mut_aa', 0: 'esm_score'})
-        seq_results = pd.DataFrame({'seq_id': seq_id, 'mut_name': raw_seq_results['wt_aa_and_pos'].str.replace(' ', '') + raw_seq_results['mut_aa'], 'esm_score': raw_seq_results['esm_score']})
-        results.append(seq_results)
-        
-    results = pd.concat(results).reset_index(drop=True)
-    results.to_csv(args.output_csv_file, index=False)
+    wrote_header = False
+    chunk_size = 1000
 
-    print('Done.')
+    for start in range(0, len(input_df), chunk_size):
+        end = start + chunk_size
+        chunk_df = input_df.iloc[start:end].reset_index(drop=True)
 
+        print(f'Processing proteins {start + 1}-{min(end, len(input_df))} of {len(input_df)}...')
+
+        input_df_ids, LLRs = get_wt_LLR(
+            chunk_df,
+            model=model,
+            alphabet=alphabet,
+            batch_converter=batch_converter,
+            device=device,
+            silent=False,
+        )
+
+        chunk_results = []
+
+        for seq_id, LLR in zip(input_df_ids, LLRs):
+            raw_seq_results = (
+                LLR.transpose()
+                .stack()
+                .reset_index()
+                .rename(columns={
+                    'level_0': 'wt_aa_and_pos',
+                    'level_1': 'mut_aa',
+                    0: 'esm_score',
+                })
+            )
+
+            seq_results = pd.DataFrame({
+                'seq_id': seq_id,
+                'mut_name': raw_seq_results['wt_aa_and_pos'].str.replace(' ', '') + raw_seq_results['mut_aa'],
+                'esm_score': raw_seq_results['esm_score'],
+            })
+
+            chunk_results.append(seq_results)
+
+        chunk_results = pd.concat(chunk_results).reset_index(drop=True)
+
+        chunk_results.to_csv(
+            args.output_csv_file,
+            mode='a',
+            header=not wrote_header,
+            index=False,
+        )
+        wrote_header = True
+
+        del chunk_df, input_df_ids, LLRs, chunk_results
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
